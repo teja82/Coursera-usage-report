@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Coursera Usage Report</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prop-types/15.8.1/prop-types.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <script src="https://unpkg.com/papaparse@latest/papaparse.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/recharts/2.12.7/Recharts.min.js"></script>
+</head>
+<body class="bg-gray-100 font-sans">
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useEffect } = React;
+    const { createRoot } = ReactDOM;
+
+    const App = () => {
+      const [data, setData] = useState([]);
+      const [loading, setLoading] = useState(false);
+      const [error, setError] = useState(null);
+
+      // Handle file upload and parsing
+      const handleFileUpload = (event) => {
+        const file = event.target.files[0];
+        if (!file || !file.name.match(/\.(xlsx|xls|csv)$/)) {
+          setError('Please upload a valid Excel (.xlsx, .xls) or CSV (.csv) file');
+          return;
+        }
+
+        setLoading(true);
+        setError(null);
+
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          try {
+            let jsonData = [];
+
+            if (file.name.match(/\.(xlsx|xls)$/)) {
+              // Parse Excel file
+              const workbook = XLSX.read(e.target.result, { type: 'binary' });
+              const sheetName = workbook.SheetNames[0];
+              const sheet = workbook.Sheets[sheetName];
+              const parsedData = XLSX.utils.sheet_to_json(sheet, {
+                header: 1,
+                defval: '',
+                blankrows: false,
+              });
+
+              // Convert to object array with headers
+              const headers = parsedData[0].map(header => header.trim().replace(/^"|"$/g, ''));
+              jsonData = parsedData.slice(1).map(row => {
+                const rowObj = {};
+                headers.forEach((header, index) => {
+                  let value = row[index] || '';
+                  if (header === 'Estimated Learning Hours' || header === 'Overall Progress' || header === 'Course Grade') {
+                    value = value ? parseFloat(value) : 0;
+                  } else if (header === 'Rank') {
+                    value = value ? parseInt(value) : 0;
+                  } else if (header === 'Completed') {
+                    value = value.toString().toLowerCase() === 'yes';
+                  } else {
+                    value = value.toString().trim().replace(/^"|"$/g, '');
+                  }
+                  rowObj[header] = value;
+                });
+                return rowObj;
+              });
+            } else if (file.name.match(/\.csv$/)) {
+              // Parse CSV file
+              const parsedData = Papa.parse(e.target.result, {
+                header: true,
+                skipEmptyLines: true,
+                transformHeader: header => header.trim().replace(/^"|"$/g, ''),
+                transform: (value, header) => {
+                  let cleaned = value.trim().replace(/^"|"$/g, '');
+                  if (header === 'Estimated Learning Hours' || header === 'Overall Progress' || header === 'Course Grade') {
+                    return cleaned ? parseFloat(cleaned) : 0;
+                  }
+                  if (header === 'Completed') {
+                    return cleaned.toLowerCase() === 'yes';
+                  }
+                  return cleaned;
+                },
+              });
+              jsonData = parsedData.data;
+            }
+
+            setData(jsonData.filter(row => Object.values(row).some(val => val !== '')));
+            setLoading(false);
+          } catch (err) {
+            setError('Error parsing file: ' + err.message);
+            setLoading(false);
+          }
+        };
+        reader.onerror = () => {
+          setError('Error reading file');
+          setLoading(false);
+        };
+        reader.readAsBinaryString(file);
+      };
+
+      // Process data for insights
+      const processData = (data) => {
+        const businessUnits = [...new Set(data.map(row => row['Business Unit']).filter(unit => unit))];
+        const insights = businessUnits.map(unit => {
+          const unitData = data.filter(row => row['Business Unit'] === unit);
+          const uniqueUsers = new Set(unitData.map(row => row['Name'])).size;
+          const totalCourses = unitData.length;
+          const totalLearningHours = unitData.reduce((sum, row) => sum + (row['Estimated Learning Hours'] || 0), 0);
+          const uniqueCourses = new Set(unitData.map(row => row['Course'])).size;
+          const completedCourses = unitData.filter(row => row['Completed']).length;
+          const completionRate = totalCourses ? (completedCourses / totalCourses * 100).toFixed(2) : 0;
+          const courseTypes = {};
+          unitData.forEach(row => {
+            const type = row['Course Type'] || 'Unknown';
+            courseTypes[type] = (courseTypes[type] || 0) + 1;
+          });
+
+          return {
+            businessUnit: unit,
+            uniqueUsers,
+            totalCourses,
+            totalLearningHours: totalLearningHours.toFixed(2),
+            uniqueCourses,
+            completedCourses,
+            completionRate,
+            courseTypes
+          };
+        });
+
+        return insights.sort((a, b) => b.totalLearningHours - a.totalLearningHours);
+      };
+
+      // Format numbers for display
+      const formatNumber = (num) => {
+        if (typeof num !== 'number') return num;
+        if (num >= 1000) return (num / 1000).toFixed(1) + 'K';
+        return num.toFixed(2).replace(/\.00$/, '');
+      };
+
+      // Get interesting fact
+      const getInterestingFact = (insights) => {
+        const highestCompletion = insights.reduce((max, curr) => 
+          parseFloat(curr.completionRate) > parseFloat(max.completionRate) ? curr : max, 
+          insights[0] || { completionRate: 0 }
+        );
+        return highestCompletion.businessUnit 
+          ? `The ${highestCompletion.businessUnit} unit has the highest completion rate at ${highestCompletion.completionRate}%!`
+          : 'No data available for completion rates.';
+      };
+
+      // Render loading or error state
+      if (loading) {
+        return (
+          <div className="flex justify-center items-center h-screen">
+            <p className="text-xl text-gray-700">Loading...</p>
+          </div>
+        );
+      }
+
+      if (error) {
+        return (
+          <div className="container mx-auto p-4">
+            <h1 className="text-3xl font-bold text-center text-blue-800 mb-6">Coursera Usage Report</h1>
+            <div className="bg-white p-6 rounded-lg shadow-md mb-8">
+              <p className="text-red-600">{error}</p>
+              <input
+                type="file"
+                accept=".xlsx,.xls,.csv"
+                onChange={handleFileUpload}
+                className="mt-4 block w-full text-sm text-gray-500
+                  file:mr-4 file:py-2 file:px-4
+                  file:rounded-full file:border-0
+                  file:text-sm file:font-semibold
+                  file:bg-blue-50 file:text-blue-700
+                  hover:file:bg-blue-100"
+              />
+            </div>
+          </div>
+        );
+      }
+
+      const insights = data.length ? processData(data) : [];
+      const interestingFact = data.length ? getInterestingFact(insights) : 'Upload an Excel or CSV file to see insights.';
+
+      // Render main report
+      return (
+        <div className="container mx-auto p-4">
+          <h1 className="text-3xl font-bold text-center text-blue-800 mb-6">Coursera Usage Report</h1>
+          <div className="bg-white p-6 rounded-lg shadow-md mb-8">
+            <h2 className="text-xl font-semibold text-gray-800 mb-4">Upload Excel or CSV File</h2>
+            <input
+              type="file"
+              accept=".xlsx,.xls,.csv"
+              onChange={handleFileUpload}
+              className="block w-full text-sm text-gray-500
+                file:mr-4 file:py-2 file:px-4
+                file:rounded-full file:border-0
+                file:text-sm file:font-semibold
+                file:bg-blue-50 file:text-blue-700
+                hover:file:bg-blue-100"
+            />
+          </div>
+
+          {data.length > 0 && (
+            <>
+              {/* Summary Section */}
+              <div className="bg-white p-6 rounded-lg shadow-md mb-8">
+                <h2 className="text-2xl font-semibold text-gray-800 mb-4">Summary</h2>
+                <p className="text-gray-700">Total Unique Users: {formatNumber(new Set(data.map(row => row['Name'])).size)}</p>
+                <p className="text-gray-700">Total Learning Hours: {formatNumber(data.reduce((sum, row) => sum + (row['Estimated Learning Hours'] || 0), 0))}</p>
+                <p className="text-gray-700">Total Courses: {formatNumber(data.length)}</p>
+                <p className="text-gray-700">Interesting Fact: {interestingFact}</p>
+              </div>
+
+              {/* Visualizations Section */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+                {/* Bar Chart: Unique Users and Total Courses */}
+                <div className="bg-white p-4 rounded-lg shadow-md">
+                  <h2 className="text-xl font-semibold text-gray-800 mb-4">Unique Users and Total Courses by Business Unit</h2>
+                  <Recharts.ResponsiveContainer width="100%" height={300}>
+                    <Recharts.BarChart data={insights}>
+                      <Recharts.CartesianGrid strokeDasharray="3 3" />
+                      <Recharts.XAxis dataKey="businessUnit" tick={{ fontSize: 12 }} />
+                      <Recharts.YAxis tickFormatter={formatNumber} tick={{ fontSize: 12 }} />
+                      <Recharts.Tooltip formatter={(value) => formatNumber(value)} />
+                      <Recharts.Legend />
+                      <Recharts.Bar dataKey="uniqueUsers" fill="#3B82F6" name="Unique Users" />
+                      <Recharts.Bar dataKey="totalCourses" fill="#10B981" name="Total Courses" />
+                    </Recharts.BarChart>
+                  </Recharts.ResponsiveContainer>
+                </div>
+
+                {/* Stacked Bar Chart: Course Type Distribution */}
+                <div className="bg-white p-4 rounded-lg shadow-md">
+                  <h2 className="text-xl font-semibold text-gray-800 mb-4">Course Type Distribution by Business Unit</h2>
+                  <Recharts.ResponsiveContainer width="100%" height={300}>
+                    <Recharts.BarChart data={insights}>
+                      <Recharts.CartesianGrid strokeDasharray="3 3" />
+                      <Recharts.XAxis dataKey="businessUnit" tick={{ fontSize: 12 }} />
+                      <Recharts.YAxis tickFormatter={formatNumber} tick={{ fontSize: 12 }} />
+                      <Recharts.Tooltip formatter={(value) => formatNumber(value)} />
+                      <Recharts.Legend />
+                      {['Course', 'Guided Project', 'Qwiklabs Project', 'Self-Paced Project'].map((type, index) => (
+                        <Recharts.Bar 
+                          key={type} 
+                          dataKey={`courseTypes.${type}`} 
+                          stackId="a" 
+                          fill={['#3B82F6', '#10B981', '#F59E0B', '#EF4444'][index]} 
+                          name={type} 
+                        />
+                      ))}
+                    </Recharts.BarChart>
+                  </Recharts.ResponsiveContainer>
+                </div>
+
+                {/* Pie Chart: Completion Rate */}
+                {insights.length <= 7 && (
+                  <div className="bg-white p-4 rounded-lg shadow-md">
+                    <h2 className="text-xl font-semibold text-gray-800 mb-4">Completion Rate by Business Unit</h2>
+                    <Recharts.ResponsiveContainer width="100%" height={300}>
+                      <Recharts.PieChart>
+                        <Recharts.Pie
+                          data={insights}
+                          dataKey="completionRate"
+                          nameKey="businessUnit"
+                          cx="50%"
+                          cy="50%"
+                          outerRadius={100}
+                          fill="#3B82F6"
+                          label={({ name, value }) => `${name}: ${value}%`}
+                          labelLine
+                        >
+                          {insights.map((entry, index) => (
+                            <Recharts.Cell key={`cell-${index}`} fill={['#3B82F6', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#EC4899', '#6B7280'][index % 7]} />
+                          ))}
+                        </Recharts.Pie>
+                        <Recharts.Tooltip formatter={(value) => `${value}%`} />
+                        <Recharts.Legend />
+                      </Recharts.PieChart>
+                    </Recharts.ResponsiveContainer>
+                  </div>
+                )}
+              </div>
+
+              {/* Detailed Table */}
+              <div className="bg-white p-6 rounded-lg shadow-md mb-8">
+                <h2 className="text-2xl font-semibold text-gray-800 mb-4">Detailed Insights</h2>
+                <div className="overflow-x-auto">
+                  <table className="min-w-full bg-white">
+                    <thead>
+                      <tr className="bg-gray-200 text-gray-600 uppercase text-sm leading-normal">
+                        <th className="py-3 px-6 text-left">Business Unit</th>
+                        <th className="py-3 px-6 text-right">Unique Users</th>
+                        <th className="py-3 px-6 text-right">Total Courses</th>
+                        <th className="py-3 px-6 text-right">Learning Hours</th>
+                        <th className="py-3 px-6 text-right">Unique Courses</th>
+                        <th className="py-3 px-6 text-right">Completed Courses</th>
+                        <th className="py-3 px-6 text-right">Completion Rate (%)</th>
+                      </tr>
+                    </thead>
+                    <tbody className="text-gray-600 text-sm">
+                      {insights.map((row, index) => (
+                        <tr key={index} className="border-b border-gray-200 hover:bg-gray-100">
+                          <td className="py-3 px-6 text-left">{row.businessUnit}</td>
+                          <td className="py-3 px-6 text-right">{formatNumber(row.uniqueUsers)}</td>
+                          <td className="py-3 px-6 text-right">{formatNumber(row.totalCourses)}</td>
+                          <td className="py-3 px-6 text-right">{formatNumber(row.totalLearningHours)}</td>
+                          <td className="py-3 px-6 text-right">{formatNumber(row.uniqueCourses)}</td>
+                          <td className="py-3 px-6 text-right">{formatNumber(row.completedCourses)}</td>
+                          <td className="py-3 px-6 text-right">{row.completionRate}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* Conclusion Section */}
+              <div className="bg-white p-6 rounded-lg shadow-md">
+                <h2 className="text-2xl font-semibold text-gray-800 mb-4">Conclusion</h2>
+                <p className="text-gray-700">
+                  The report provides a detailed breakdown of Coursera usage by business unit. Units with low completion rates or learning hours may require targeted interventions, such as additional training resources or engagement campaigns. Upload new Excel or CSV files to track ongoing progress and trends.
+                </p>
+              </div>
+            </>
+          )}
+        </div>
+      );
+    };
+
+    const root = createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
